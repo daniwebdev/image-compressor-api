@@ -81,6 +81,14 @@ Example:
 curl "http://localhost:8080/compressor?url=https://example.com/image.jpg&output=webp&quality=80&resolution=1024x720"
 ```
 
+### Custom Port
+
+By default, the server listens on port `8080`. If you wish to use a custom port, you can specify it during the startup of the server using the `-p` flag. For example:
+
+```bash
+./image-compressor -o ./tmp -p 8888
+```
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).

@@ -19,10 +19,14 @@ import (
 	"github.com/nfnt/resize"
 )
 
-var outputDirectory string
+var (
+	outputDirectory string
+	port            int
+)
 
 func init() {
 	flag.StringVar(&outputDirectory, "o", ".", "Output directory for compressed images")
+	flag.IntVar(&port, "p", 8080, "Port for the server to listen on")
 	flag.Parse()
 }
 
@@ -250,6 +254,6 @@ func main() {
 
 	http.Handle("/", r)
 
-	fmt.Printf("Server is listening on :8080. Output directory: %s\n", outputDirectory)
-	http.ListenAndServe(":8080", nil)
+	fmt.Printf("Server is listening on :%d. Output directory: %s\n", port, outputDirectory)
+	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
 }
