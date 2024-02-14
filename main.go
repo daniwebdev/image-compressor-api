@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"net/url"
+
 	"github.com/chai2010/webp"
 	"github.com/gorilla/mux"
 	"github.com/nfnt/resize"
@@ -22,12 +24,36 @@ import (
 var (
 	outputDirectory string
 	port            int
+	allowedDomains string
 )
 
+var URLParse = url.Parse;
+
 func init() {
-	flag.StringVar(&outputDirectory, "o", ".", "Output directory for compressed images")
-	flag.IntVar(&port, "p", 8080, "Port for the server to listen on")
-	flag.Parse()
+    flag.StringVar(&outputDirectory, "o", ".", "Output directory for compressed images")
+    flag.IntVar(&port, "p", 8080, "Port for the server to listen on")
+    flag.StringVar(&allowedDomains, "s", "*", "Allowed domains separated by comma (,)")
+    flag.Parse()
+}
+
+func isDomainAllowed(url string) bool {
+    if allowedDomains == "*" {
+        return true // Allow all domains
+    }
+
+    allowedDomainList := strings.Split(allowedDomains, ",")
+    u, err := URLParse(url)
+    if err != nil {
+        return false
+    }
+
+    for _, domain := range allowedDomainList {
+        if strings.HasSuffix(u.Hostname(), domain) {
+            return true
+        }
+    }
+
+    return false
 }
 
 func downloadImage(url string) (image.Image, string, error) {
@@ -145,9 +171,16 @@ func compressHandler(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("output")
 	quality := r.URL.Query().Get("quality")
 	resolution := r.URL.Query().Get("resolution")
+	version := r.URL.Query().Get("v")
+
+	// Check if the URL domain is allowed
+	if !isDomainAllowed(url) {
+		http.Error(w, "URL domain not allowed", http.StatusForbidden)
+		return
+	}
 
 	// Concatenate parameters into a single string
-	paramsString := fmt.Sprintf("%s-%s-%s-%s", url, format, quality, resolution)
+	paramsString := fmt.Sprintf("%s-%s-%s-%s-%s", url, format, quality, resolution, version)
 
 	// Generate MD5 hash from the concatenated parameters
 	hash := generateMD5Hash(paramsString)
@@ -249,8 +282,14 @@ func compressHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	r := mux.NewRouter()
+
 	r.HandleFunc("/compressor", compressHandler).Methods("GET")
 	r.HandleFunc("/compressor/{filename}", compressHandler).Methods("GET")
+
+	// / get return multiline text
+	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "ok!")
+	})
 
 	http.Handle("/", r)
 
