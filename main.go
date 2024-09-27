@@ -9,10 +9,13 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 
 	"net/url"
 
@@ -24,56 +27,61 @@ import (
 var (
 	outputDirectory string
 	port            int
-	allowedDomains string
+	allowedDomains  string
+	contentTypeMap  = map[string]string{
+		"jpeg": "image/jpeg",
+		"png":  "image/png",
+		"webp": "image/webp",
+	}
+	initOnce sync.Once
 )
 
-var URLParse = url.Parse;
-
-func init() {
-    flag.StringVar(&outputDirectory, "o", ".", "Output directory for compressed images")
-    flag.IntVar(&port, "p", 8080, "Port for the server to listen on")
-    flag.StringVar(&allowedDomains, "s", "*", "Allowed domains separated by comma (,)")
-    flag.Parse()
+func initConfig() {
+	initOnce.Do(func() {
+		flag.StringVar(&outputDirectory, "o", ".", "Output directory for compressed images")
+		flag.IntVar(&port, "p", 8080, "Port for the server to listen on")
+		flag.StringVar(&allowedDomains, "s", "*", "Allowed domains separated by comma (,)")
+		flag.Parse()
+	})
 }
 
-func isDomainAllowed(url string) bool {
-    if allowedDomains == "*" {
-        return true // Allow all domains
-    }
+func isDomainAllowed(urlString string) bool {
+	if allowedDomains == "*" {
+		return true
+	}
 
-    allowedDomainList := strings.Split(allowedDomains, ",")
-    u, err := URLParse(url)
-    if err != nil {
-        return false
-    }
+	allowedDomainList := strings.Split(allowedDomains, ",")
+	parsedURL, err := url.Parse(urlString)
+	if err != nil {
+		return false
+	}
 
-    for _, domain := range allowedDomainList {
-        if strings.HasSuffix(u.Hostname(), domain) {
-            return true
-        }
-    }
+	for _, domain := range allowedDomainList {
+		if strings.HasSuffix(parsedURL.Hostname(), domain) {
+			return true
+		}
+	}
 
-    return false
+	return false
 }
 
-func downloadImage(url string) (image.Image, string, error) {
-	resp, err := http.Get(url)
+func downloadImage(urlString string) (image.Image, string, error) {
+	resp, err := http.Get(urlString)
 	if err != nil {
 		return nil, "", err
 	}
 	defer resp.Body.Close()
 
+	contentType := resp.Header.Get("Content-Type")
 	var img image.Image
 	var format string
 
-	// Determine the image format based on content type
-	contentType := resp.Header.Get("Content-Type")
 	switch {
 	case strings.Contains(contentType, "jpeg"):
-		img, _, err = image.Decode(resp.Body)
+		img, format, err = image.Decode(resp.Body)
 		format = "jpeg"
 	case strings.Contains(contentType, "png"):
-		img, _, err = image.Decode(resp.Body)
+		img, format, err = image.Decode(resp.Body)
 		format = "png"
 	case strings.Contains(contentType, "webp"):
 		img, err = webp.Decode(resp.Body)
@@ -90,40 +98,30 @@ func downloadImage(url string) (image.Image, string, error) {
 }
 
 func compressImage(img image.Image, format, output string, quality int, resolution string) error {
-	// Resize the image if resolution is provided
 	if resolution != "" {
 		size := strings.Split(resolution, "x")
 		width, height := parseResolution(size[0], size[1], img.Bounds().Dx(), img.Bounds().Dy())
 		img = resize.Resize(width, height, img, resize.Lanczos3)
 	}
 
-	// Create the output file in the specified directory
 	out, err := os.Create(filepath.Join(outputDirectory, output))
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	// Compress and save the image in the specified format
 	switch format {
 	case "jpeg":
-		options := jpeg.Options{Quality: quality}
-		err = jpeg.Encode(out, img, &options)
+		err = jpeg.Encode(out, img, &jpeg.Options{Quality: quality})
 	case "png":
-		encoder := png.Encoder{CompressionLevel: png.BestCompression}
-		err = encoder.Encode(out, img)
+		err = (&png.Encoder{CompressionLevel: png.BestCompression}).Encode(out, img)
 	case "webp":
-		options := &webp.Options{Lossless: true}
-		err = webp.Encode(out, img, options)
+		err = webp.Encode(out, img, &webp.Options{Lossless: true})
 	default:
 		return fmt.Errorf("unsupported output format")
 	}
 
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func generateMD5Hash(input string) string {
@@ -132,103 +130,44 @@ func generateMD5Hash(input string) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-func atoi(s string) int {
-	result := 0
-	for _, c := range s {
-		result = result*10 + int(c-'0')
-	}
-	return result
-}
-
 func parseResolution(width, height string, originalWidth, originalHeight int) (uint, uint) {
-	var newWidth, newHeight uint
-
 	if width == "auto" && height == "auto" {
-		// If both dimensions are "auto," maintain the original size
-		newWidth = uint(originalWidth)
-		newHeight = uint(originalHeight)
+		return uint(originalWidth), uint(originalHeight)
 	} else if width == "auto" {
-		// If width is "auto," calculate height maintaining the aspect ratio
-		ratio := float64(originalWidth) / float64(originalHeight)
-		newHeight = uint(atoi(height))
-		newWidth = uint(float64(newHeight) * ratio)
+		newHeight, _ := strconv.Atoi(height)
+		return uint(float64(newHeight) * float64(originalWidth) / float64(originalHeight)), uint(newHeight)
 	} else if height == "auto" {
-		// If height is "auto," calculate width maintaining the aspect ratio
-		ratio := float64(originalHeight) / float64(originalWidth)
-		newWidth = uint(atoi(width))
-		newHeight = uint(float64(newWidth) * ratio)
-	} else {
-		// Use the provided width and height
-		newWidth = uint(atoi(width))
-		newHeight = uint(atoi(height))
+		newWidth, _ := strconv.Atoi(width)
+		return uint(newWidth), uint(float64(newWidth) * float64(originalHeight) / float64(originalWidth))
 	}
-
-	return newWidth, newHeight
+	newWidth, _ := strconv.Atoi(width)
+	newHeight, _ := strconv.Atoi(height)
+	return uint(newWidth), uint(newHeight)
 }
 
 func compressHandler(w http.ResponseWriter, r *http.Request) {
-	url := r.URL.Query().Get("url")
+	urlString := r.URL.Query().Get("url")
 	format := r.URL.Query().Get("output")
-	quality := r.URL.Query().Get("quality")
+	qualityStr := r.URL.Query().Get("quality")
 	resolution := r.URL.Query().Get("resolution")
 	version := r.URL.Query().Get("v")
 
-	// Check if the URL domain is allowed
-	if !isDomainAllowed(url) {
+	if !isDomainAllowed(urlString) {
 		http.Error(w, "URL domain not allowed", http.StatusForbidden)
 		return
 	}
 
-	// Concatenate parameters into a single string
-	paramsString := fmt.Sprintf("%s-%s-%s-%s-%s", url, format, quality, resolution, version)
-
-	// Generate MD5 hash from the concatenated parameters
+	paramsString := fmt.Sprintf("%s-%s-%s-%s-%s", urlString, format, qualityStr, resolution, version)
 	hash := generateMD5Hash(paramsString)
-
-	// Generate the output filename using the hash and format
 	output := fmt.Sprintf("%s.%s", hash, format)
 
-	// Check if the compressed file already exists in the output directory
 	filePath := filepath.Join(outputDirectory, output)
 	if _, err := os.Stat(filePath); err == nil {
-		// File exists, no need to download and compress again
-
-		// Open and send the existing compressed image file
-		compressedFile, err := os.Open(filePath)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Error opening compressed image file: %s", err), http.StatusInternalServerError)
-			return
-		}
-		defer compressedFile.Close()
-
-		// Set the appropriate Content-Type based on the output format
-		var contentType string
-		switch format {
-		case "jpeg":
-			contentType = "image/jpeg"
-		case "png":
-			contentType = "image/png"
-		case "webp":
-			contentType = "image/webp"
-		default:
-			http.Error(w, "Unsupported output format", http.StatusInternalServerError)
-			return
-		}
-
-		// Set the Content-Type header
-		w.Header().Set("Content-Type", contentType)
-
-		// Copy the existing compressed image file to the response writer
-		_, err = io.Copy(w, compressedFile)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Error sending compressed image: %s", err), http.StatusInternalServerError)
-			return
-		}
-
+		sendExistingFile(w, filePath, format)
 		return
 	}
 
-	img, imgFormat, err := downloadImage(url)
+	img, imgFormat, err := downloadImage(urlString)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error downloading image: %s", err), http.StatusInternalServerError)
 		return
@@ -238,30 +177,17 @@ func compressHandler(w http.ResponseWriter, r *http.Request) {
 		format = imgFormat
 	}
 
-	err = compressImage(img, format, output, atoi(quality), resolution)
+	quality, _ := strconv.Atoi(qualityStr)
+	err = compressImage(img, format, output, quality, resolution)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error compressing image: %s", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Set the appropriate Content-Type based on the output format
-	var contentType string
-	switch format {
-	case "jpeg":
-		contentType = "image/jpeg"
-	case "png":
-		contentType = "image/png"
-	case "webp":
-		contentType = "image/webp"
-	default:
-		http.Error(w, "Unsupported output format", http.StatusInternalServerError)
-		return
-	}
+	sendExistingFile(w, filePath, format)
+}
 
-	// Set the Content-Type header
-	w.Header().Set("Content-Type", contentType)
-
-	// Open and send the compressed image file
+func sendExistingFile(w http.ResponseWriter, filePath, format string) {
 	compressedFile, err := os.Open(filePath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error opening compressed image file: %s", err), http.StatusInternalServerError)
@@ -269,30 +195,37 @@ func compressHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer compressedFile.Close()
 
-	// Copy the compressed image file to the response writer
-	_, err = io.Copy(w, compressedFile)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error sending compressed image: %s", err), http.StatusInternalServerError)
-		return
-	}
-	fmt.Fprintf(w, "Image compressed and saved to %s\n", filePath)
+	w.Header().Set("Content-Type", contentTypeMap[format])
+	io.Copy(w, compressedFile)
+}
+
+func printBanner() {
+	banner := `
+------------------------------------
+Image Optimizer Service
+
+Author: https://github.com/daniwebdev`
+	fmt.Println(banner)
+	fmt.Printf("Server is running on port: %d\n", port)
+	fmt.Printf("Allowed Domains: %s\n", allowedDomains)
+	fmt.Printf("Output Directory: %s\n", outputDirectory)
+	fmt.Println("------------------------------------")
 }
 
 
-
 func main() {
+	initConfig()
+
 	r := mux.NewRouter()
-
-	r.HandleFunc("/compressor", compressHandler).Methods("GET")
-	r.HandleFunc("/compressor/{filename}", compressHandler).Methods("GET")
-
-	// / get return multiline text
+	r.HandleFunc("/optimize", compressHandler).Methods("GET")
+	r.HandleFunc("/optimize/{filename}", compressHandler).Methods("GET")
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "ok!")
 	})
 
-	http.Handle("/", r)
+	log.Printf("Server is listening on :%d. Output directory: %s\n", port, outputDirectory)
 
-	fmt.Printf("Server is listening on :%d. Output directory: %s\n", port, outputDirectory)
-	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+	printBanner()
+
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), r))
 }
